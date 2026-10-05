@@ -120,7 +120,8 @@ factorio_version() {
 rcon_cmd() {
     local host="127.0.0.1"
     [ -n "$RCON_BIND" ] && [ "$RCON_BIND" != "0.0.0.0" ] && host="$RCON_BIND"
-    [ -n "$RCON_PORT" ] && [ -n "$RCON_PASSWORD" ] || return 1
+    [ -n "$RCON_PORT" ] || return 1
+    [ -n "$RCON_PASSWORD" ] || return 1
     # Password through the environment, not argv (visible in ps)
     FW_RCON_PASSWORD="$RCON_PASSWORD" python3 "$FW_LIBDIR/libexec/fw-rcon" "$host" "$RCON_PORT" "$*" 2>/dev/null
 }
@@ -169,7 +170,8 @@ msg() {
 
 notify() {
     local text="$1" cid
-    [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_IDS" ] || return 0
+    [ -n "$TELEGRAM_TOKEN" ] || return 0
+    [ -n "$TELEGRAM_CHAT_IDS" ] || return 0
     for cid in $(printf '%s' "$TELEGRAM_CHAT_IDS" | tr ',"' '  '); do
         curl -s -m 15 -o /dev/null -X POST \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \

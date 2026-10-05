@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[[ "$FW_ROOT" == /* ]] && [[ "$FW_LIBDIR" == /* ]] || die "--root and --libdir must be absolute paths"
+[[ "$FW_ROOT" == /* && "$FW_LIBDIR" == /* ]] || die "--root and --libdir must be absolute paths"
 # The map render runs as the service user unless another one is given (it needs
 # write access to the mapshot client and output directories)
 FW_RENDER_USER="${FW_RENDER_USER:-$FW_USER}"
