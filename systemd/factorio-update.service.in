@@ -1,0 +1,8 @@
+[Unit]
+Description=Factorio worlds: update the headless server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@FW_LIBDIR@/libexec/update.sh all

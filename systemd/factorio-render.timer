@@ -1,0 +1,10 @@
+[Unit]
+Description=Factorio worlds: daily map render
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

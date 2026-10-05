@@ -1,0 +1,5 @@
+{
+  "description": "Only the keys that differ from common/server-settings.base.json",
+  "auto_pause": false,
+  "max_players": 8
+}

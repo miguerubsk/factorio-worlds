@@ -1,0 +1,8 @@
+[Unit]
+Description=Factorio map render after the last player left: %i
+
+[Service]
+Type=oneshot
+User=@FW_RENDER_USER@
+Group=@FW_USER@
+ExecStart=@FW_LIBDIR@/libexec/render.sh after-leave %i

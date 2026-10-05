@@ -1,0 +1,9 @@
+# Local settings and secrets: never commit them
+*.env
+!examples/*.env.example
+server-settings.base.json
+server-settings.generated.json
+# Game data
+*.zip
+*.tar.xz
+*.log

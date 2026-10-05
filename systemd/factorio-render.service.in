@@ -1,0 +1,8 @@
+[Unit]
+Description=Factorio worlds: daily map render (worlds with RENDER=1)
+
+[Service]
+Type=oneshot
+User=@FW_RENDER_USER@
+Group=@FW_USER@
+ExecStart=@FW_LIBDIR@/libexec/render.sh daily

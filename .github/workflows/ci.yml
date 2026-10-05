@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck -x install.sh uninstall.sh bin/factorio-worlds lib/common.sh libexec/*.sh
+      - name: Python syntax
+        run: python3 -m py_compile libexec/fw-rcon

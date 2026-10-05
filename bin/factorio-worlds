@@ -1,0 +1,322 @@
+#!/bin/bash
+# factorio-worlds — several Factorio worlds on one headless server, one at a time.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+FW_VERSION="0.1.0"
+PROG=$(basename "$0")
+
+B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; D=$'\e[2m'; N=$'\e[0m'
+[ -t 1 ] || { B=; G=; Y=; R=; D=; N=; }
+
+die()  { echo "${R}ERROR:${N} $*" >&2; exit 1; }
+info() { echo "${B}==>${N} $*"; }
+
+usage() {
+    cat <<EOF
+${B}Usage:${N} $PROG <command> [arguments]
+
+  status                    State of every world (default)
+  list                      World names
+  switch <world> [-f]       Save and stop the running world, start <world>
+  start [world]             Start <world> (or the last one chosen)
+  stop                      Stop the running world (saves with /quit)
+  restart                   Restart the running world
+  attach                    Open the server console (detach: Ctrl+A, D)
+  logs [-f] [world]         Show the console log
+  cmd <command...>          Send a command over RCON (e.g. $PROG cmd /time)
+  players                   Players online
+  update [world|all]        Update the headless server (uses sudo)
+  new <world> [options]     Create a world:
+      --from <world>          copy the game (and its mods) from another world
+                              (default: download the headless server)
+      --version <x.y.z>       version to download (default: stable)
+      --name "Name"           name shown in the server browser
+      --save <file.zip>       import an existing save
+      --create                generate a new map
+      --map-gen <file.json>   ... with these map-gen-settings (implies --create)
+      --map-settings <file>   ... with these map-settings (implies --create)
+      --no-mods               with --from: do not copy the mods
+      --no-space-age          only the base game (players without the DLC can join)
+  remove <world>            Delete a stopped world (backs up its save first)
+  version                   Show the version
+
+Worlds: $(list_instances | tr '\n' ' ')
+EOF
+}
+
+# systemctl without sudo when polkit allows it; otherwise with sudo
+svc() {
+    local err
+    if [ "$EUID" -eq 0 ]; then systemctl "$@"; return; fi
+    err=$(systemctl --no-ask-password "$@" 2>&1) && return 0
+    if grep -qiE "access denied|authentication|not authorized|permission" <<<"$err"; then
+        sudo systemctl "$@"
+    else
+        echo "$err" >&2; return 1
+    fi
+}
+
+require_running() {
+    CURRENT=$(running_instance)
+    [ -n "$CURRENT" ] || die "No world is running. Use: $PROG start <world>"
+    load_instance "$CURRENT" || exit 1
+}
+
+# Waits until the server accepts players (or fails)
+wait_ready() {
+    local name="$1" i
+    ( load_instance "$name" || exit 1
+      printf "Waiting for %s" "$name"
+      for i in $(seq 1 180); do
+          if ! systemctl is-active -q "$UNIT"; then
+              echo; echo "${R}The service stopped.${N} Check: journalctl -u $UNIT -n 50 and $PROG logs $name"; exit 1
+          fi
+          if tail -n 200 "$LOG_FILE" 2>/dev/null | grep -q "changing state from(CreatingGame) to(InGame)"; then
+              echo " ${G}ready${N} (${i}s)"; exit 0
+          fi
+          printf "."; sleep 1
+      done
+      echo " ${Y}still loading${N} ($PROG logs -f to follow it)" )
+}
+
+cmd_status() {
+    local running selected name
+    running=$(running_instances)
+    selected=$(selected_instance)
+    [ "$(wc -w <<<"$running")" -gt 1 ] && echo "${R}WARNING: several worlds are running: $running${N}"
+    printf "${B}%-3s %-14s %-28s %-10s %-22s %s${N}\n" "" "WORLD" "NAME" "VERSION" "SAVE" "STATE"
+    for name in $(list_instances); do
+        ( load_instance "$name" 2>/dev/null || exit
+          mark="  "; state="${D}stopped${N}"
+          if grep -qx "$name" <<<"$running"; then
+              mark="${G}●${N} "
+              players=$(players_online)
+              if [ "$players" = "-1" ]; then state="${Y}starting${N}"
+              else state="${G}running${N} · $players player(s)"; fi
+          elif [ "$name" = "$selected" ]; then
+              state="${D}stopped (starts at boot)${N}"
+          fi
+          printf "%-3s %-14s %-28s %-10s %-22s %s\n" "$mark" "$name" "${DISPLAY_NAME:0:28}" \
+              "$(factorio_version "$FACTORIO_BIN")" "${SAVE_NAME:0:22}" "$state" )
+    done
+}
+
+cmd_switch() {
+    local target="" force=0 current n ans a
+    for a in "$@"; do case "$a" in -f|--force) force=1 ;; *) target="$a" ;; esac; done
+    [ -n "$target" ] || die "Which world? $(list_instances | tr '\n' ' ')"
+    instance_exists "$target" || die "World '$target' does not exist. Available: $(list_instances | tr '\n' ' ')"
+
+    current=$(running_instance)
+    if [ "$current" = "$target" ]; then info "'$target' is already running."; return 0; fi
+
+    if [ -n "$current" ]; then
+        load_instance "$current"
+        n=$(players_online)
+        if [ "$n" -gt 0 ] 2>/dev/null && [ "$force" = 0 ]; then
+            read -r -p "${Y}$n player(s) online in '$current'.${N} Switch anyway? [y/N] " ans
+            [[ "$ans" =~ ^[yY]$ ]] || { echo "Cancelled."; exit 1; }
+        fi
+        info "Stopping '$current' (saving)..."
+        svc stop "$UNIT" || die "Could not stop '$current'"
+    fi
+
+    load_instance "$target"
+    info "Starting '$target' ($DISPLAY_NAME)..."
+    svc start "$UNIT" || die "Could not start '$target'. Check: journalctl -u $UNIT -n 50"
+    notify "$(msg "$MSG_SWITCH" name "$DISPLAY_NAME" world "$WORLD_NAME")"
+    wait_ready "$target"
+}
+
+cmd_start() {
+    local target="${1:-$(selected_instance)}" current
+    [ -n "$target" ] || die "Which world? $(list_instances | tr '\n' ' ')"
+    current=$(running_instance)
+    [ -n "$current" ] && [ "$current" != "$target" ] && die "'$current' is running. Use: $PROG switch $target"
+    load_instance "$target" || exit 1
+    info "Starting '$target'..."
+    svc start "$UNIT" && wait_ready "$target"
+}
+
+cmd_logs() {
+    local follow=0 name="" a
+    for a in "$@"; do case "$a" in -f) follow=1 ;; *) name="$a" ;; esac; done
+    name="${name:-$(running_instance)}"; name="${name:-$(selected_instance)}"
+    load_instance "$name" || exit 1
+    if [ "$follow" = 1 ]; then tail -n 50 -F "$LOG_FILE"; else tail -n 100 "$LOG_FILE"; fi
+}
+
+# Leaves a directory usable by the service user: group, g+w and setgid
+fix_perms() {
+    chgrp -R "$FW_USER" "$1" 2>/dev/null
+    chmod -R g+w "$1" 2>/dev/null
+    find "$1" -type d -exec chmod g+s {} + 2>/dev/null
+}
+
+base_only_modlist() {
+    echo '{"mods":[{"name":"base","enabled":true},{"name":"elevated-rails","enabled":false},{"name":"quality","enabled":false},{"name":"space-age","enabled":false}]}' | jq .
+}
+
+cmd_new() {
+    local name="" from="" version="stable" display="" save_file="" create=0 \
+          map_gen="" map_settings="" mods=1 space_age=1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)         from="$2"; shift ;;
+            --version)      version="$2"; shift ;;
+            --name)         display="$2"; shift ;;
+            --save)         save_file="$2"; shift ;;
+            --create)       create=1 ;;
+            --map-gen)      map_gen="$2"; create=1; shift ;;
+            --map-settings) map_settings="$2"; create=1; shift ;;
+            --no-mods)      mods=0 ;;
+            --no-space-age) space_age=0 ;;
+            -*)             die "Unknown option: $1" ;;
+            *)              [ -n "$name" ] && die "Unexpected argument: $1"; name="$1" ;;
+        esac
+        shift
+    done
+
+    [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "Invalid name (use lowercase letters, digits, - and _)"
+    valid_name "$name" || die "'$name' is a reserved name"
+    local src="" dst save_name tarball nzip f
+    dst=$(instance_dir "$name")
+    [ -e "$dst" ] && die "$dst already exists"
+    if [ -n "$from" ]; then
+        instance_exists "$from" || die "Source world '$from' does not exist"
+        src=$(instance_dir "$from")
+    fi
+    [ -n "$save_file" ] && [ "$create" = 1 ] && die "Use either --save or --create, not both"
+    if [ -n "$save_file" ]; then
+        [ -f "$save_file" ] || die "$save_file does not exist"
+        unzip -tq "$save_file" >/dev/null 2>&1 || die "$save_file does not look like a valid save (.zip)"
+    fi
+    for f in "$map_gen" "$map_settings"; do
+        [ -z "$f" ] || jq -e . "$f" >/dev/null 2>&1 || die "$f does not exist or is not valid JSON"
+    done
+    [ -w "$FW_ROOT" ] || die "Cannot write to $FW_ROOT (are you in the '$FW_USER' group? log in again after adding yourself)"
+
+    # The imported save names SAVE_NAME; otherwise the world name
+    save_name="$name"
+    [ -n "$save_file" ] && save_name=$(basename "$save_file" .zip)
+
+    umask 002
+    if [ -n "$src" ]; then
+        info "Creating $dst from '$from'..."
+        mkdir -p "$dst"/{saves,mods} || die "Could not create $dst"
+        cp -a "$src"/{bin,data,config-path.cfg} "$dst"/ || die "Copying the game failed"
+        [ -d "$src/config" ] && cp -a "$src/config" "$dst"/
+        nzip=$(find "$src/mods" -maxdepth 1 -name '*.zip' 2>/dev/null | wc -l)
+        if [ "$mods" = 1 ]; then
+            cp -a "$src"/mods/{mod-list.json,mod-settings.dat} "$dst/mods/" 2>/dev/null
+            if [ "$nzip" -gt 0 ]; then
+                # Hard links take no extra space; plain copy if not possible
+                cp -al "$src"/mods/*.zip "$dst/mods/" 2>/dev/null || cp -a "$src"/mods/*.zip "$dst/mods/"
+                info "$nzip mods copied from '$from'"
+            fi
+        fi
+    else
+        info "Resolving Factorio version '$version'..."
+        version=$(resolve_version "$version")
+        [ -n "$version" ] || die "Could not resolve the version (network?)"
+        info "Downloading the headless server $version (cached in $FW_CACHE)..."
+        tarball=$(fetch_headless "$version") || die "Download failed"
+        mkdir -p "$dst" || die "Could not create $dst"
+        tar -xf "$tarball" -C "$dst" --strip-components=1 || { rm -rf "$dst"; die "Extracting $tarball failed"; }
+        mkdir -p "$dst"/{saves,mods}
+    fi
+    [ "$space_age" = 0 ] && base_only_modlist > "$dst/mods/mod-list.json"
+
+    cat > "$dst/.env" <<EOT
+# Settings of world '$name'. Everything shared (ports, RCON, notifications,
+# credentials) is in $COMMON_ENV and can be overridden here.
+
+# Name in the server browser
+DISPLAY_NAME="${display:-$name}"
+# World name used in notifications
+WORLD_NAME="$save_name"
+# Main save: saves/<SAVE_NAME>.zip
+SAVE_NAME="$save_name"
+# Daily map render with mapshot (needs MAPSHOT_ENABLED=1 in the common .env)
+RENDER=0
+# Update the headless server automatically
+UPDATE=1
+# USE_WHITELIST=1
+# EXTRA_ARGS=""
+EOT
+
+    if [ -n "$save_file" ]; then
+        cp "$save_file" "$dst/saves/$save_name.zip"
+        info "Save imported: saves/$save_name.zip"
+    elif [ "$create" = 1 ]; then
+        local args=(--create "$dst/saves/$save_name.zip")
+        [ -n "$map_gen" ] && args+=(--map-gen-settings "$map_gen")
+        [ -n "$map_settings" ] && args+=(--map-settings "$map_settings")
+        info "Generating a new map..."
+        "$dst/bin/x64/factorio" "${args[@]}" > "$dst/create.log" 2>&1 \
+            || { fix_perms "$dst"; die "Map generation failed. See $dst/create.log"; }
+        rm -f "$dst/create.log"
+        info "Map created: saves/$save_name.zip"
+    fi
+
+    fix_perms "$dst"
+    echo
+    echo "${G}World '$name' created.${N}"
+    echo "  Review:   $dst/.env"
+    echo "  Optional: $dst/server-settings.override.json (only the keys that differ)"
+    if [ ! -f "$dst/saves/$save_name.zip" ]; then
+        echo "  ${Y}No save yet:${N} copy one to $dst/saves/$save_name.zip"
+        echo "            or create the world again with --save <file.zip> or --create"
+    fi
+    echo "  Then:     $PROG switch $name"
+}
+
+cmd_remove() {
+    local name="$1" dir backup ans
+    instance_exists "$name" || die "World '$name' does not exist"
+    load_instance "$name" || exit 1
+    dir="$INSTANCE_DIR"
+    [[ "$dir" == "$FW_ROOT"/?* ]] || die "Unexpected path: $dir"
+    grep -qx "$name" <<<"$(running_instances)" && die "'$name' is running. Switch to another world first."
+
+    echo "${Y}$dir will be deleted ($(du -sh "$dir" 2>/dev/null | cut -f1)).${N}"
+    echo "Its .env, main save and mod list are backed up first to $BACKUP_DIR/$name/"
+    read -r -p "Type the world name to confirm: " ans
+    [ "$ans" = "$name" ] || { echo "Cancelled."; exit 1; }
+
+    backup="$BACKUP_DIR/$name/removed_$(date +%Y%m%d_%H%M%S).tar.gz"
+    mkdir -p "$(dirname "$backup")" || die "Could not create $(dirname "$backup")"
+    # shellcheck disable=SC2046  # optional files, word splitting intended
+    tar -czf "$backup" -C "$dir" .env \
+        $(cd "$dir" && ls "saves/$SAVE_NAME.zip" mods/mod-list.json mods/mod-settings.dat server-settings.override.json 2>/dev/null) \
+        || die "Backup failed; nothing was deleted"
+    info "Backup saved to $backup"
+
+    # Files created by the service belong to $FW_USER: sudo if needed
+    rm -rf "$dir" 2>/dev/null || sudo rm -rf "$dir" || die "Could not delete $dir"
+    if [ "$(selected_instance)" = "$name" ]; then
+        : > "$ACTIVE_FILE"
+        echo "${Y}It was the world started at boot.${N} Pick another one with: $PROG switch <world>"
+    fi
+    info "World '$name' removed."
+}
+
+case "${1:-status}" in
+    status|st)      cmd_status ;;
+    list|ls)        list_instances ;;
+    switch|use|sw)  shift; cmd_switch "$@" ;;
+    start)          shift; cmd_start "$@" ;;
+    stop)           require_running; info "Stopping '$CURRENT'..."; svc stop "$UNIT" ;;
+    restart)        require_running; info "Restarting '$CURRENT'..."; svc restart "$UNIT" && wait_ready "$CURRENT" ;;
+    attach|console) require_running; exec sudo -u "$FW_USER" /usr/bin/screen -r "$SESSION" ;;
+    logs|log)       shift; cmd_logs "$@" ;;
+    cmd|rcon)       shift; require_running; [ $# -gt 0 ] || die "Missing command"; rcon_cmd "$*" || die "RCON is not answering" ;;
+    players)        require_running; rcon_cmd "/players online" || die "RCON is not answering" ;;
+    update)         shift; exec sudo "$FW_LIBDIR/libexec/update.sh" "${1:-all}" ;;
+    new)            shift; cmd_new "$@" ;;
+    remove|rm)      shift; cmd_remove "$1" ;;
+    version|-V|--version) echo "factorio-worlds $FW_VERSION" ;;
+    -h|--help|help) usage ;;
+    *)              usage; exit 1 ;;
+esac

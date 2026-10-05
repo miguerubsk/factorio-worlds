@@ -1,0 +1,12 @@
+[Unit]
+Description=Factorio world watcher (notifications, activity): %i
+BindsTo=factorio@%i.service
+After=factorio@%i.service
+
+[Service]
+Type=simple
+User=@FW_USER@
+Group=@FW_USER@
+ExecStart=@FW_LIBDIR@/libexec/watcher.sh %i
+Restart=always
+RestartSec=5

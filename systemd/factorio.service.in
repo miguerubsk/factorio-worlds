@@ -1,0 +1,12 @@
+[Unit]
+Description=Factorio worlds: start the last world chosen
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@FW_LIBDIR@/libexec/boot.sh
+
+[Install]
+WantedBy=multi-user.target

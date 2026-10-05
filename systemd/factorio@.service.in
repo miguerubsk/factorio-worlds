@@ -1,0 +1,23 @@
+[Unit]
+Description=Factorio world: %i
+After=network-online.target
+Wants=network-online.target factorio-notifier@%i.service
+ConditionPathExists=@FW_ROOT@/%i/.env
+
+[Service]
+# screen -dm detaches from the terminal -> forking
+Type=forking
+User=@FW_USER@
+Group=@FW_USER@
+WorkingDirectory=@FW_ROOT@/%i
+ExecStartPre=@FW_LIBDIR@/libexec/prestart.sh %i
+ExecStart=@FW_LIBDIR@/libexec/launch.sh %i
+ExecStop=@FW_LIBDIR@/libexec/stop.sh %i
+ExecStopPost=/bin/sh -c 'rm -f "@FW_ROOT@/%i/.lock" "@FW_ROOT@/%i"/saves/*.tmp.zip'
+TimeoutStopSec=180
+Restart=on-failure
+RestartSec=15
+Nice=-5
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
