@@ -159,9 +159,16 @@ bigger problem.
 
 ## Roadmap
 
-- Several worlds running at once on different ports
-- Mod management (download and update from the mod portal)
-- Tested on more distributions
+Planned work is tracked in
+[milestones](https://github.com/miguerubsk/factorio-worlds/milestones):
+
+- **0.1.1 Fixes:** testing on a real systemd + polkit machine, per-command help
+- **0.2.0 Map creation:** seed, map generation preset, scenario, per-world map
+  generation files, map preview
+- **0.3.0 Saves:** list, back up and restore saves, bash completion
+- **0.4.0 Mods:** download and update mods from the mod portal
+- **1.0.0 Stable:** automated tests, more distributions, translatable
+  messages, several worlds at once
 
 ## License
 
